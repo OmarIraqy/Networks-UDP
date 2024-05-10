@@ -2,7 +2,7 @@ import socket
 from random import random
 from packet import Packet
 
-class UDPServer:
+class Receiver:
     def __init__(self, receiver_ip, receiver_port, sender_ip, sender_port):
         self.receiver_ip = receiver_ip
         self.receiver_port = receiver_port
@@ -87,9 +87,3 @@ class UDPServer:
             except socket.timeout:
                 print("Timeout waiting for ACK")
                 break
-
-# Usage
-server = UDPServer('127.0.0.1', 54321, '127.0.0.1', 12345)
-print("Listening on port: 54321")
-data = server.start()
-print(data)

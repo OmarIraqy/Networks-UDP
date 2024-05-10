@@ -1,8 +1,8 @@
 import socket
 from packet import Packet
 
-class UDPSender:
-    def __init__(self, sender_ip='127.0.0.1', sender_port=12345, receiver_ip='127.0.0.1', receiver_port=54321, timeout=1, data_size=10):
+class Sender:
+    def __init__(self, sender_ip, sender_port, receiver_ip, receiver_port, timeout, data_size=20):
         self.sender_ip = sender_ip
         self.sender_port = sender_port
         self.receiver_ip = receiver_ip
@@ -66,9 +66,9 @@ class UDPSender:
                 # Timeout, retransmit the packet
                 continue
         
-        sender.send_fin()
-        sender.wait_for_fin_ack()
-        sender.close()
+        self.send_fin()
+        self.wait_for_fin_ack()
+        self.close()
 
     def send_fin(self):
         fin_packet = Packet('FIN', Packet.pick_id(), 0, 0, '')
@@ -93,7 +93,3 @@ class UDPSender:
     def close(self):
         # Close the socket
         self.sock.close()
-
-# Example usage
-sender = UDPSender()
-sender.send_data(b'Hello, World alufskhfkajsilfasilfjilashflukashulfhasulhfuio;jhkl/afdi;hfio;sdhfio;jasdio;fasdilfjkasdgf')
