@@ -1,6 +1,7 @@
 from random import randint
 from pickle import dumps, loads
 from struct import unpack
+from random import random
 
 
 class Packet():
@@ -11,6 +12,7 @@ class Packet():
         self.seq = seq
         self.length = length
         self.data = data
+        self.p_type = 0
         if p_type == 'DATA':
             self.p_type = 0x0
         elif p_type == 'ACK':
@@ -19,6 +21,11 @@ class Packet():
             self.p_type = 0x2
         elif p_type == 'FIN-ACK':
             self.p_type = 0x3
+        elif p_type == 'SYN':
+            self.p_type |= 0x4 
+        elif p_type == 'SYN-ACK':
+            self.p_type |= 0x5
+
         self.checksum = Packet.checksum(self)
         self.unacknowledged_packet_ids.append(self.id)
 
@@ -44,6 +51,10 @@ class Packet():
             return 'FIN'
         elif self.p_type == 0x3:
             return 'FIN-ACK'
+        elif self.p_type == 0x4:
+            return 'SYN' 
+        elif self.p_type == 0x5:
+            return 'SYN-ACK'
 
     def get_reply(self):
         if self.get_type() == 'FIN':
@@ -90,7 +101,7 @@ class Packet():
         length = head_unpacked[2]
         checksum = head_unpacked[3]
 
-        data = packet_bytes[7:]
+        data = packet_bytes[7:].decode('UTF-8')
 
         if p_type == 0x0:
             str_type = 'DATA'
@@ -100,6 +111,10 @@ class Packet():
             str_type = 'FIN'
         elif p_type == 0x3:
             str_type = 'FIN-ACK'
+        elif p_type == 0x4:
+            str_type = 'SYN' 
+        elif p_type == 0x5:
+            str_type = 'SYN-ACK'
 
         return Packet(str_type, pid, seq, length, data)
 
@@ -109,17 +124,22 @@ class Packet():
 
         type_binary = format(packet.p_type, '#010b')
         id_binary = format(packet.id, '#010b')
-        type_id_binary = int(type_binary+id_binary[2:], 2)
+        type_id_binary = int(type_binary + id_binary[2:], 2)
         checksum = type_id_binary ^ checksum
 
         checksum = packet.length ^ checksum
 
-        if (isinstance(packet.data, str)):
+        if isinstance(packet.data, str):
             temp_data = packet.data.encode('UTF-8')
         else:
             temp_data = packet.data
         temp_data = int.from_bytes(temp_data, byteorder='big')
-        while(temp_data):
+        
+        # Introduce a 10% chance of calculating the checksum wrong
+        if random() < 0.1:
+            checksum = checksum ^ randint(0, 65535)  # XOR with a random number
+
+        while temp_data:
             temp_data_bin = temp_data & 0xffff
             checksum = temp_data_bin ^ checksum
             temp_data = temp_data >> 16

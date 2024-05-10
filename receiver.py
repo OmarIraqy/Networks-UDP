@@ -1,111 +1,95 @@
 import socket
-from threading import Thread, Lock
+from random import random
 from packet import Packet
 
-HOST = '127.0.0.1'  
-MAX_PACKET_SIZE = 33000
+class UDPServer:
+    def __init__(self, receiver_ip, receiver_port, sender_ip, sender_port):
+        self.receiver_ip = receiver_ip
+        self.receiver_port = receiver_port
+        self.sender_ip = sender_ip
+        self.sender_port = sender_port
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind((self.receiver_ip, self.receiver_port))
+        self.flag = True
 
-add_packet_lock = Lock()
-find_defragment_lock = Lock()
+    def start(self):
+        while self.flag:
+            self.handshake()
 
-
-class TCPRecvDefragment:
-    def __init__(self, sender_addr, pid):
-        self.sender_addr = sender_addr
-        self.pid = pid
-        self.packet_list = []
-
-    def add_packet(self, packet):
-        if Packet.checksum(packet) != packet.checksum:
-            return False
-
-        if packet.get_type() == 'FIN' and packet.seq > len(self.packet_list):
-            return False
-
-        with add_packet_lock:
-            if packet in self.packet_list:
-                return True
-
-            self.packet_list.append(packet)
-
-        return True
-
-    def __eq__(self, other):
-        return self.sender_addr == other.sender_addr and self.pid == other.pid
-
-    def write_out(self):
-        filename = self.sender_addr[0].replace(
-            '.', '_') + '_' + str(self.sender_addr[1]) + '_' + str(self.pid) + '.out'
-
-        with open(filename, 'wb+') as f:
-            self.packet_list.sort()
-            for packet in self.packet_list:
-                f.write(packet.data)
-
-        return filename
-
-
-class TCPRecvThread(Thread):
-
-    def __init__(self, sock, sender_addr, data, all_tcp_recv):
-        Thread.__init__(self)
-        self.sock = sock
-        self.sender_addr = sender_addr
-        self.data = data
-        self.all_tcp_recv = all_tcp_recv
-
-    def run(self):
-        recv_packet = Packet.from_bytes(self.data)
-        print(f'{self.sender_addr} -> {str(recv_packet)}')
-
-        packet_id = recv_packet.id
-        packet_seq = recv_packet.seq
-        curr_tcp_recv = TCPRecvDefragment(self.sender_addr, packet_id)
-        reply = None
-
-        with find_defragment_lock:
-            for instance in self.all_tcp_recv:
-                if instance == curr_tcp_recv:
-                    curr_tcp_recv = instance
+            data = ''
+            fin_flag = True
+            while fin_flag:
+                try:
+                    data_bytes, _ = self.sock.recvfrom(1024)
+                    data_packet = Packet.from_bytes(data_bytes)
+                    if data_packet.get_type() == 'DATA':
+                        print(f"Received data packet with seq_num={data_packet.seq}")
+                        if data_packet.checksum == Packet.checksum(data_packet):
+                            if random() >= 0.02:
+                                data += data_packet.data
+                                ack_packet = Packet('ACK', data_packet.id, data_packet.seq, 0, '')
+                                self.sock.sendto(ack_packet.to_bytes(), (self.sender_ip, self.sender_port))
+                            else:
+                                print("Packet loss, discarding acknowledgment...")
+                        else:
+                            print("Corrupted data packet, discarding...")
+                    elif data_packet.get_type() == 'FIN':
+                        print("Received FIN, sending FIN-ACK")
+                        fin_ack_packet = Packet('FIN-ACK', data_packet.id, data_packet.seq, 0, '')
+                        self.sock.sendto(fin_ack_packet.to_bytes(), (self.sender_ip, self.sender_port))
+                        fin_flag = False
+                    else:
+                        print("Did not receive FIN")
+                except socket.timeout:
+                    print("Timeout waiting for data, closing connection")
                     break
+
+
+            try:
+                ack_bytes, _ = self.sock.recvfrom(1024)
+                ack_packet = Packet.from_bytes(ack_bytes)
+                if ack_packet.get_type() == 'ACK':
+                    print("Received ACK for FIN-ACK, closing connection")
+                    break
+                else:
+                    print("Did not receive ACK for FIN-ACK")
+                    break
+            except socket.timeout:
+                print("Timeout waiting for ACK")
+                break
+    
+        self.sock.close()
+        return data
+
+    def handshake(self):
+        flag = True
+        while flag:
+            syn_bytes, _ = self.sock.recvfrom(1024)
+            syn_packet = Packet.from_bytes(syn_bytes)
+            if syn_packet.get_type() == 'SYN':
+                print("Received SYN, sending SYN-ACK")
+                flag=False
+                syn_ack_packet = Packet('SYN-ACK', syn_packet.id, syn_packet.seq, 0, '')
+                self.sock.sendto(syn_ack_packet.to_bytes(), (self.sender_ip, self.sender_port))
             else:
-                self.all_tcp_recv.append(curr_tcp_recv)
+                print("Did not receive SYN")
+                continue
 
-        if (curr_tcp_recv.add_packet(recv_packet)):
-            reply = recv_packet.get_reply()
+            try:
+                ack_bytes, _ = self.sock.recvfrom(1024)
+                ack_packet = Packet.from_bytes(ack_bytes)
+                if ack_packet.get_type() == 'ACK' and ack_packet.id == syn_packet.id:
+                    print("Received ACK, handshake complete")
+                    break
+                else:
+                    print("Did not receive ACK for SYN-ACK")
+                    break
+            except socket.timeout:
+                print("Timeout waiting for ACK")
+                break
 
-        if reply is not None:
-            self.sock.sendto(reply.to_bytes(), self.sender_addr)
-            print(f'{self.sender_addr} <- {str(reply)}')
-
-            if reply.get_type() == 'FIN-ACK':
-                filename = curr_tcp_recv.write_out()
-
-                if curr_tcp_recv in self.all_tcp_recv:
-                    self.all_tcp_recv.remove(curr_tcp_recv)
-                print(
-                    f'[i] Written file from {self.sender_addr} with id {packet_id} to {filename}')
-        else:
-            print(f'DROP {str(recv_packet)}')
-
-
-class TCPRecv:
-
-    def __init__(self, addr):
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.bind(addr)
-            all_tcp_recv = []
-            print(f'[i] Listening on {addr}')
-
-            while True:
-                data, addr = s.recvfrom(MAX_PACKET_SIZE)
-
-                conn_thread = TCPRecvThread(s, addr, data, all_tcp_recv)
-                conn_thread.start()
-
-
-if __name__ == "__main__":
-    addr_port = int(input('Enter port to bind: '))
-    addr = (HOST, addr_port)
-
-    TCPRecv(addr)
+# Usage
+server = UDPServer('127.0.0.1', 54321, '127.0.0.1', 12345)
+print("Listening on port: 54321")
+data = server.start()
+print(data)

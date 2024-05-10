@@ -1,131 +1,99 @@
 import socket
-from threading import Thread, Event, Lock
 from packet import Packet
-from itertools import chain, islice
-from random import randint
 
-HOST = '127.0.0.1'
-
-MAX_DATA_SIZE = 32768
-MAX_PACKET_SIZE = 33000
-MAX_SINGLE_SEND = 5
-
-
-class TCPSendThread(Thread):
-
-    def __init__(self, src, dest, timeout, packets, event):
-        Thread.__init__(self)
-        self.stopped = event
-        self.src = src
-        self.dest = dest
+class UDPSender:
+    def __init__(self, sender_ip='127.0.0.1', sender_port=12345, receiver_ip='127.0.0.1', receiver_port=54321, timeout=1, data_size=10):
+        self.sender_ip = sender_ip
+        self.sender_port = sender_port
+        self.receiver_ip = receiver_ip
+        self.receiver_port = receiver_port
         self.timeout = timeout
-        self.unacknowledged_packets = packets
-        self.pid = self.unacknowledged_packets[0].id
+        self.data_size = data_size
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.bind((self.sender_ip, self.sender_port))
 
-    def run(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.bind(self.src)
+    def handshake(self):
+        self.send_syn()
+        self.wait_for_syn_ack()
 
-            ack_thread = TCPAckThread(
-                self.pid, self.unacknowledged_packets, sock)
-            ack_thread.start()
+    def send_syn(self):
+        syn_packet = Packet('SYN', Packet.pick_id(), 0, 0, '')
+        self.sock.sendto(syn_packet.to_bytes(), (self.receiver_ip, self.receiver_port))
+        print("Sent SYN packet")
 
-            for unacknowledged_packet in self.unacknowledged_packets[:MAX_SINGLE_SEND]:
-                sock.sendto(unacknowledged_packet.to_bytes(), self.dest)
-                print(f'{self.dest} <- {unacknowledged_packet}')
-
-            while not self.stopped.wait(self.timeout):
-                if len(self.unacknowledged_packets) == 0:
-                    self.stopped.set()
-                for unacknowledged_packet in self.unacknowledged_packets[:MAX_SINGLE_SEND]:
-                    sock.sendto(
-                        unacknowledged_packet.to_bytes(), self.dest)
-                    print(f'{self.dest} <- {unacknowledged_packet}')
-
-            ack_thread.join()
-
-        print(f'[i] All package for id {self.pid} sent!')
-
-
-class TCPAckThread(Thread):
-
-    def __init__(self, pid, unacknowledged_packets, sock):
-        Thread.__init__(self)
-        self.stopped = Event()
-        self.unacknowledged_packets = unacknowledged_packets
-        self.sock = sock
-        self.pid = pid
-
-    def run(self):
-        while not self.stopped.is_set():
-            data, addr = self.sock.recvfrom(MAX_PACKET_SIZE)
-            ack_packet = Packet.from_bytes(data)
-            print(f'{addr} -> {ack_packet}')
-
-            if ack_packet in self.unacknowledged_packets:
-                self.unacknowledged_packets.remove(ack_packet)
-
-            if (ack_packet.get_type() == 'FIN-ACK'):
-                self.stopped.set()
-
-        print(f'[i] All package for id {self.pid} acknowledged!')
-
-
-class TCPSend:
-
-    def __init__(self, dest, timeout, files):
-        all_packets = []
-
-        for file_to_split in files:
-            all_packets.append(list(self.file_to_packets(file_to_split)))
-
-        stop_flags = []
-        send_threads = []
-        base_port = randint(1025, 65534)
-
-        for idx, single_file_packets in enumerate(all_packets):
-            stop_flag = Event()
-            stop_flags.append(stop_flag)
-
-            src = (HOST, base_port + idx)
-
-            send_thread = TCPSendThread(
-                src, dest, timeout, single_file_packets, stop_flag)
-            send_threads.append(send_thread)
-            send_thread.start()
-
-        for idx, thread in enumerate(send_threads):
-            thread.join()
-
-    @staticmethod
-    def file_to_packets(filename):
+    def wait_for_syn_ack(self):
         try:
-            with open(filename, 'rb') as file_to_split:
-                pid = Packet.pick_id()
-                seq = 0
-                chunk = file_to_split.read(MAX_DATA_SIZE)
+            syn_ack_bytes, _ = self.sock.recvfrom(1024)
+            syn_ack_packet = Packet.from_bytes(syn_ack_bytes)
+            if syn_ack_packet.get_type() == 'SYN-ACK':
+                print("Received SYN-ACK, sending ACK")
+                ack_packet = Packet('ACK', syn_ack_packet.id, syn_ack_packet.seq, 0, '')
+                self.sock.sendto(ack_packet.to_bytes(), (self.receiver_ip, self.receiver_port))
+            else:
+                print("Did not receive SYN-ACK")
+                exit()
+        except socket.timeout:
+            print("Timeout waiting for SYN-ACK")
+            self.sock.close()
+            exit()
 
-                while chunk:
-                    next_chunk = file_to_split.read(MAX_DATA_SIZE)
-                    if next_chunk:
-                        yield Packet('DATA', pid, seq, len(chunk), chunk)
-                        chunk = next_chunk
-                    else:
-                        yield Packet('FIN', pid, seq, len(chunk), chunk)
-                        chunk = False
-                    seq += 1
-        except OSError as err:
-            print(f'File {filename} doesn\'t exist')
+    def send_data(self, data):
+        self.handshake()
+        seq_num = 2  # Start with the next sequence number after SYN
+        while seq_num < len(data):
+            # Create a new packet
+            packet = Packet('DATA', Packet.pick_id(), seq_num, self.data_size, data[seq_num-2:seq_num-2 + self.data_size])
 
+            # Serialize packet to bytes
+            packet_bytes = packet.to_bytes()
 
-if __name__ == '__main__':
-    dest_ip = HOST
-    dest_port = input('Enter destination (Port): ')
-    dest = (dest_ip.strip(), int(dest_port.strip()))
+            # Send packet
+            self.sock.sendto(packet_bytes, (self.receiver_ip, self.receiver_port))
+            print(f"Sent packet with seq_num={seq_num}")
 
-    timeout = float(input('Timeout (s): '))
+            # Wait for acknowledgment
+            try:
+                ack, _ = self.sock.recvfrom(1024)
+                ack_packet = Packet.from_bytes(ack)
 
-    files = input('Files to send (Separated by comma): ')
-    files = [f.strip() for f in files.split(',')]
+                # Check if the acknowledgment is correct
+                if ack_packet.get_type() == 'ACK' and ack_packet.id == packet.id:
+                    print(f"Received ACK for seq_num={seq_num}")
+                    seq_num += self.data_size  # Move to the next sequence number
+            except socket.timeout:
+                print(f"Timeout for seq_num={seq_num}, retransmitting...")
+                # Timeout, retransmit the packet
+                continue
+        
+        sender.send_fin()
+        sender.wait_for_fin_ack()
+        sender.close()
 
-    TCPSend(dest, timeout, files)
+    def send_fin(self):
+        fin_packet = Packet('FIN', Packet.pick_id(), 0, 0, '')
+        self.sock.sendto(fin_packet.to_bytes(), (self.receiver_ip, self.receiver_port))
+        print("Sent FIN packet")
+
+    def wait_for_fin_ack(self):
+        try:
+            fin_ack_bytes, _ = self.sock.recvfrom(1024)
+            fin_ack_packet = Packet.from_bytes(fin_ack_bytes)
+            if fin_ack_packet.get_type() == 'FIN-ACK':
+                print("Received FIN-ACK, sending ACK")
+                ack_packet = Packet('ACK', fin_ack_packet.id, fin_ack_packet.seq, 0, '')
+                self.sock.sendto(ack_packet.to_bytes(), (self.receiver_ip, self.receiver_port))
+            else:
+                print("Did not receive FIN-ACK")
+                exit()
+        except socket.timeout:
+            print("Timeout waiting for FIN-ACK")
+            exit()
+
+    def close(self):
+        # Close the socket
+        self.sock.close()
+
+# Example usage
+sender = UDPSender()
+sender.send_data(b'Hello, World alufskhfkajsilfasilfjilashflukashulfhasulhfuio;jhkl/afdi;hfio;sdhfio;jasdio;fasdilfjkasdgf')
